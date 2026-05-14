@@ -24,6 +24,8 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const googleApiKey = import.meta.env.VITE_GOOGLE_API_KEY;
+  const googleCx = import.meta.env.VITE_GOOGLE_CX;
 
   // Load chats from localStorage
   useEffect(() => {
@@ -90,47 +92,151 @@ export default function App() {
     }
   };
 
-  const generateResponse = (userMessage: string): { text: string; imageUrl?: string } => {
-    const msg = userMessage.toLowerCase();
+  const buildContextualQuery = (userMessage: string, history: Message[]): string => {
+    const trimmed = userMessage.trim();
+    if (!trimmed) return userMessage;
 
-    if (msg.includes('generate image') || msg.includes('create image') || msg.includes('draw')) {
-      // Use a working placeholder image service
-      const timestamp = Date.now();
-      const imageUrl = `https://picsum.photos/600/400?random=${timestamp}`;
-      return {
-        text: 'Here\'s a generated image for you:',
-        imageUrl: imageUrl,
-      };
+    const followUpPatterns = [
+      /^it\b/i,
+      /^that\b/i,
+      /^this\b/i,
+      /^those\b/i,
+      /^they\b/i,
+      /^them\b/i,
+      /^what about/i,
+      /^how about/i,
+      /^also\b/i,
+      /^then\b/i,
+      /^next\b/i,
+      /^more\b/i,
+      /^another\b/i,
+      /^still\b/i,
+    ];
+
+    const isFollowUp = followUpPatterns.some((pattern) => pattern.test(trimmed)) || /\b(it|that|this|those|they|them|these|there|here)\b/i.test(trimmed);
+    if (!isFollowUp || history.length < 2) {
+      return userMessage;
     }
 
-    if (msg.includes('code') || msg.includes('javascript') || msg.includes('python') || msg.includes('react')) {
-      return {
-        text: `Here's a JavaScript example:\n\nconst greet = (name) => {\n  console.log(\`Hello, \${name}!\`);\n};\n\ngreet('World');\n\nThis function takes a parameter and logs a greeting to the console.`,
-      };
+    const previousUser = [...history].reverse().find((msg) => msg.sender === 'user');
+    if (!previousUser || previousUser.text.trim().toLowerCase() === trimmed.toLowerCase()) {
+      return userMessage;
     }
 
-    if (msg.includes('calculate') || msg.includes('math')) {
-      return { text: 'Sure, I can help with calculations. For example: 2 + 2 = 4. What would you like me to calculate?' };
-    }
-
-    if (msg.includes('time') || msg.includes('date')) {
-      return { text: `The current date and time is: ${new Date().toLocaleString()}` };
-    }
-
-    if (msg.includes('hello') || msg.includes('hi') || msg.includes('hey')) {
-      return { text: 'Hello! How can I help you?' };
-    }
-
-    if (msg.includes('who are you') || msg.includes('what are you')) {
-      return { text: "I'm Joe, an AI assistant. I can help with questions, coding, image generation, and much more. What would you like to know?" };
-    }
-
-    return {
-      text: `You asked about "${userMessage}". I'm here to help with:\n\n• Answering questions\n• Writing and explaining code\n• Problem-solving\n• Information on various topics\n\nWhat would you like to know?`,
-    };
+    return `${previousUser.text} ${userMessage}`;
   };
 
-  const handleSendMessage = (e: React.FormEvent) => {
+  const buildConversationSummary = (history: Message[]): string => {
+    const recentMessages = history.slice(-6);
+    if (recentMessages.length === 0) return '';
+    return recentMessages
+      .map((msg) => `${msg.sender === 'user' ? 'You' : 'Joe'}: ${msg.text}`)
+      .join('\n');
+  };
+
+  const fetchGoogleAnswer = async (query: string): Promise<string | null> => {
+    if (googleApiKey && googleCx) {
+      try {
+        const url = `https://www.googleapis.com/customsearch/v1?key=${googleApiKey}&cx=${googleCx}&q=${encodeURIComponent(query)}&num=3`;
+        const response = await fetch(url);
+        if (!response.ok) return null;
+        const data = await response.json();
+        const items = data.items;
+        if (!items || items.length === 0) return null;
+        const first = items[0];
+        const snippet = first.snippet?.replace(/\n/g, ' ') || '';
+        const title = first.title || '';
+        const link = first.link || first.formattedUrl || '';
+        let answer = snippet;
+        if (title) answer = `**${title}**\n\n${answer}`;
+        if (link) answer += `\n\nSource: ${link}`;
+        return answer;
+      } catch (error) {
+        // continue to no-key fallback below
+      }
+    }
+
+    try {
+      const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(
+        `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`
+      )}`;
+      const response = await fetch(proxyUrl);
+      if (!response.ok) return null;
+      const proxyData = await response.json();
+      const data = JSON.parse(proxyData.contents || '{}');
+      const abstract = data.AbstractText || data.Abstract || '';
+      const source = data.AbstractURL || `https://duckduckgo.com/?q=${encodeURIComponent(query)}`;
+      if (abstract) {
+        const answerText = abstract.replace(/\n/g, ' ');
+        return `**Web search summary**\n\n${answerText}\n\nSource: ${source}`;
+      }
+      const topic = Array.isArray(data.RelatedTopics) ? data.RelatedTopics[0] : null;
+      if (topic) {
+        const text = typeof topic === 'string' ? topic : topic.Text || topic.FirstURL || '';
+        if (text) {
+          return `**Suggested result**\n\n${text}\n\nSource: ${source}`;
+        }
+      }
+      return null;
+    } catch (error) {
+      return null;
+    }
+  };
+
+  const generateFallbackResponse = (userMessage: string, history: Message[]): { text: string; imageUrl?: string } => {
+    const summary = buildConversationSummary(history);
+    const msg = userMessage.toLowerCase().trim();
+    const isFollowUp = /^(it|that|this|those|they|them|what about|how about|also|then|next|more|another|still)/i.test(userMessage) || /\b(it|that|this|those|they|them|these|there|here)\b/i.test(userMessage);
+    const contextPrefix = isFollowUp && summary ? `Continuing from our recent conversation:\n${summary}\n\n` : '';
+
+    if (msg.includes('generate image') || msg.includes('create image') || msg.includes('draw') ||
+        msg.includes('make image') || msg.includes('show me') || msg.includes('picture of') ||
+        msg.includes('image of') || msg.includes('photo of')) {
+      let subject = userMessage
+        .replace(/^(generate|create|draw|make|show me)\s+(an?\s+)?image\s+of\s+/gi, '')
+        .replace(/^(generate|create|draw|make)\s+(an?\s+)?picture\s+of\s+/gi, '')
+        .replace(/^(generate|create|draw|make)\s+(an?\s+)?photo\s+of\s+/gi, '')
+        .replace(/^(show me|give me)\s+(an?\s+)?image\s+of\s+/gi, '')
+        .replace(/^(show me|give me)\s+(an?\s+)?picture\s+of\s+/gi, '')
+        .replace(/^(show me|give me)\s+(an?\s+)?photo\s+of\s+/gi, '')
+        .trim();
+
+      if (!subject) {
+        subject = userMessage.replace(/^(generate|create|draw|make|show me|give me)/gi, '').trim();
+      }
+      if (!subject) subject = 'amazing scene';
+
+      // Check for inappropriate content
+      const bannedWords = ['naked', 'nude', 'sex', 'sexy', 'porn', 'erotic', 'hot girl', 'bikini', 'lingerie'];
+      if (bannedWords.some(word => subject.toLowerCase().includes(word))) {
+        return {
+          text: `${contextPrefix}Sorry, I can't generate images with inappropriate or explicit content. Please try a different prompt.`
+        };
+      }
+
+      const imageUrl = `https://picsum.photos/512/512?random=${Date.now()}`;
+      return {
+        text: `${contextPrefix}Here's a random image:`,
+        imageUrl,
+      };
+    }
+
+    // General conversational response like ChatGPT
+    const generalResponse = `${contextPrefix}As an AI assistant, I can help with that. Based on what you've asked, here's my response:\n\n"${userMessage}" is an interesting topic. I can provide information, explanations, or help with related questions. What specifically would you like to know or do?`;
+
+    return { text: generalResponse };
+  };
+
+  const generateResponse = async (userMessage: string): Promise<{ text: string; imageUrl?: string }> => {
+    const query = buildContextualQuery(userMessage, messages);
+    const googleAnswer = await fetchGoogleAnswer(query);
+    if (googleAnswer) {
+      return { text: googleAnswer };
+    }
+    return generateFallbackResponse(userMessage, messages);
+  };
+
+  const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!input.trim() || !currentChat) return;
 
@@ -158,27 +264,25 @@ export default function App() {
     setInput('');
     setIsLoading(true);
 
-    setTimeout(() => {
-      const response = generateResponse(userQuery);
-      const joeMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        text: response.text,
-        sender: 'joe',
-        timestamp: new Date(),
-        imageUrl: response.imageUrl,
-      };
+    const response = await generateResponse(userQuery);
+    const joeMessage: Message = {
+      id: (Date.now() + 1).toString(),
+      text: response.text,
+      sender: 'joe',
+      timestamp: new Date(),
+      imageUrl: response.imageUrl,
+    };
 
-      setChats((prev) =>
-        prev.map((chat) => {
-          if (chat.id === currentChatId) {
-            return { ...chat, messages: [...chat.messages, joeMessage] };
-          }
-          return chat;
-        })
-      );
+    setChats((prev) =>
+      prev.map((chat) => {
+        if (chat.id === currentChatId) {
+          return { ...chat, messages: [...chat.messages, joeMessage] };
+        }
+        return chat;
+      })
+    );
 
-      setIsLoading(false);
-    }, 800);
+    setIsLoading(false);
   };
 
   return (
