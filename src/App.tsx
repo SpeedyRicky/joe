@@ -214,9 +214,18 @@ export default function App() {
         };
       }
 
-      const imageUrl = `https://picsum.photos/512/512?random=${Date.now()}`;
+      const normalizedSubject = subject.toLowerCase();
+      let imageUrl = `https://picsum.photos/512/512?random=${Date.now()}`;
+      if (normalizedSubject.includes('cat') || normalizedSubject.includes('kitten')) {
+        imageUrl = `https://loremflickr.com/512/512/cat`;
+      } else if (normalizedSubject.includes('dog') || normalizedSubject.includes('puppy')) {
+        imageUrl = `https://placedog.net/512/512`
+      } else if (normalizedSubject.includes('space') || normalizedSubject.includes('galaxy')) {
+        imageUrl = `https://images.unsplash.com/photo-1446776811953-b23d57bd21aa?auto=format&fit=crop&w=512&q=80`;
+      }
+
       return {
-        text: `${contextPrefix}Here's a random image:`,
+        text: `${contextPrefix}Here's an image of ${subject}:`,
         imageUrl,
       };
     }
